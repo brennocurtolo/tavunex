@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
 type Conversation = {
@@ -21,6 +22,7 @@ type Message = {
 };
 
 export default function ConversasPage() {
+  const router = useRouter();
   const [companyId, setCompanyId] = useState<string | null>(null);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -224,9 +226,20 @@ export default function ConversasPage() {
     setSending(true);
 
     try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session) {
+        router.replace("/login");
+        return;
+      }
+
       const res = await fetch("/api/whatsapp/send", {
         method: "POST",
         headers: {
+          Authorization: `Bearer ${session.access_token}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({

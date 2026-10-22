@@ -83,10 +83,20 @@ export default function WhatsAppConfigPage() {
 
   useEffect(() => {
     function handleMetaMessage(event: MessageEvent) {
-      if (
-        !event.origin.endsWith("facebook.com") &&
-        !event.origin.endsWith("facebook.net")
-      ) {
+      let origin: URL;
+      try {
+        origin = new URL(event.origin);
+      } catch {
+        return;
+      }
+
+      const trustedMetaOrigin = ["facebook.com", "facebook.net"].some(
+        (domain) =>
+          origin.protocol === "https:" &&
+          (origin.hostname === domain || origin.hostname.endsWith(`.${domain}`)),
+      );
+
+      if (!trustedMetaOrigin) {
         return;
       }
 
@@ -170,8 +180,16 @@ export default function WhatsAppConfigPage() {
       return;
     }
 
+    const appId = process.env.NEXT_PUBLIC_META_APP_ID;
+    if (!appId) {
+      setConnectionError(
+        "NEXT_PUBLIC_META_APP_ID não está configurado para este ambiente.",
+      );
+      return;
+    }
+
     window.FB.init({
-      appId: process.env.NEXT_PUBLIC_META_APP_ID,
+      appId,
       cookie: true,
       xfbml: true,
       version: "v25.0",
@@ -203,9 +221,9 @@ export default function WhatsAppConfigPage() {
       phoneNumberId: null,
     };
 
-    if (!window.FB) {
+    if (!window.FB || !sdkReady) {
       setConnectionError(
-        "O SDK da Meta não está disponível."
+        "O SDK da Meta ainda não foi configurado. Confira o ID do app e tente novamente."
       );
       return;
     }
@@ -290,21 +308,16 @@ export default function WhatsAppConfigPage() {
     code: string
   ) {
     try {
-      // O evento FINISH e o callback do FB.login
-      // podem chegar quase ao mesmo tempo.
-      //
-      // Damos um pequeno tempo para o listener
-      // receber waba_id e phone_number_id.
-      await new Promise((resolve) =>
-        setTimeout(resolve, 1200)
-      );
+      const signupDeadline = Date.now() + 10_000;
+      while (
+        (!embeddedSignupData.current.wabaId ||
+          !embeddedSignupData.current.phoneNumberId) &&
+        Date.now() < signupDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
 
-      const wabaId =
-        embeddedSignupData.current.wabaId;
-
-      const phoneNumberId =
-        embeddedSignupData.current
-          .phoneNumberId;
+      const { wabaId, phoneNumberId } = embeddedSignupData.current;
 
       if (!wabaId || !phoneNumberId) {
         setConnectionError(

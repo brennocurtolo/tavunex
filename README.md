@@ -64,27 +64,36 @@ Para disponibilizar esse fluxo:
 2. Configure as variáveis do Supabase e da Meta no ambiente publicado. As variáveis
    `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`,
    `NEXT_PUBLIC_META_APP_ID` e `NEXT_PUBLIC_META_CONFIG_ID` precisam estar definidas
-   antes do build. `SUPABASE_SERVICE_ROLE_KEY` e `META_APP_SECRET` ficam somente no
-   servidor.
+   antes do build. `SUPABASE_SERVICE_ROLE_KEY`, `META_APP_SECRET` e
+   `WHATSAPP_VERIFY_TOKEN` ficam somente no servidor. Ao trocar de aplicativo da
+   Meta, atualize o ID, o ID da configuração do Embedded Signup e o segredo para
+   pertencerem ao mesmo aplicativo; depois, faça um novo deploy.
 3. No aplicativo da Meta, autorize o domínio definitivo em **Facebook Login for
    Business > Settings > Allowed Domains for the JavaScript SDK** e os endereços
    HTTPS usados pelo fluxo em **Valid OAuth Redirect URIs**. Conclua as permissões
    e verificações exigidas pela Meta para atender empresas de terceiros e coloque
    o aplicativo em modo **Live** antes de liberar para clientes.
-4. Valide a conexão com uma conta de cliente no domínio publicado. O acesso por
-   HTTPS resolve o bloqueio de HTTP; a autorização também depende da configuração
-   e aprovação do aplicativo na Meta.
+4. Configure em **Webhooks** do produto WhatsApp a URL
+   `https://<dominio-publicado>/api/whatsapp/webhook`, usando o mesmo
+   `WHATSAPP_VERIFY_TOKEN` definido no servidor, e assine o campo `messages`.
+   O webhook também valida a assinatura `x-hub-signature-256` usando o
+   `META_APP_SECRET`.
+5. Valide a conexão com uma conta de salão no domínio publicado. O acesso por HTTPS
+   resolve o bloqueio de HTTP; a autorização também depende da configuração e
+   aprovação do aplicativo na Meta.
 
 Referência para configuração de domínio e modo Live:
 [guia de integração do Embedded Signup](https://www.twilio.com/docs/whatsapp/isv/tech-provider-program/integration-guide#update-login-settings-on-your-meta-app).
 Este projeto utiliza a API da Meta diretamente; essa referência não implica
 contratar ou integrar a Twilio.
 
-Esta seção cobre a conexão da conta. O envio e o recebimento de mensagens ainda
-precisam de ajustes antes da liberação completa: o webhook chama a IA por um
-endereço fixo em `localhost`, e as rotas de envio usam `WHATSAPP_ACCESS_TOKEN`
-global em vez da credencial salva para cada salão em
-`company_whatsapp_credentials`.
+Cada salão conecta sua própria conta pelo Embedded Signup. O token autorizado é
+salvo em `company_whatsapp_credentials` e usado para os envios daquele salão; o
+webhook identifica a empresa pelo `phone_number_id` e envia a mensagem à IA no
+mesmo domínio da aplicação. A tabela `whatsapp_processed_messages` precisa ter
+uma restrição única em `message_id` para evitar processar notificações repetidas.
+O fluxo automatizado atualmente processa mensagens de texto; mensagens de mídia
+não recebem resposta automática.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

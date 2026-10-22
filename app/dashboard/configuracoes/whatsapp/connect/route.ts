@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { META_GRAPH_VERSION } from "@/lib/server/whatsapp";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -8,8 +9,6 @@ const supabaseAdmin = createClient(
 
 const META_APP_ID = process.env.NEXT_PUBLIC_META_APP_ID;
 const META_APP_SECRET = process.env.META_APP_SECRET;
-
-const GRAPH_VERSION = "v25.0";
 
 export async function POST(request: NextRequest) {
   try {
@@ -98,11 +97,15 @@ export async function POST(request: NextRequest) {
     // 4. DADOS RECEBIDOS DO EMBEDDED SIGNUP
     // =====================================================
 
-    const {
-      code,
-      wabaId,
-      phoneNumberId,
-    } = await request.json();
+    const body = await request.json().catch(() => null);
+    const code =
+      typeof body?.code === "string" ? body.code.trim() : "";
+    const wabaId =
+      typeof body?.wabaId === "string" ? body.wabaId.trim() : "";
+    const phoneNumberId =
+      typeof body?.phoneNumberId === "string"
+        ? body.phoneNumberId.trim()
+        : "";
 
     if (!code) {
       return NextResponse.json(
@@ -145,7 +148,7 @@ export async function POST(request: NextRequest) {
     // =====================================================
 
     const tokenUrl = new URL(
-      `https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/oauth/access_token`
     );
 
     tokenUrl.searchParams.set(
@@ -171,8 +174,10 @@ export async function POST(request: NextRequest) {
       }
     );
 
-    const tokenData =
-      await tokenResponse.json();
+    const tokenData = (await tokenResponse.json()) as {
+      access_token?: string;
+      error?: { message?: string };
+    };
 
     if (
       !tokenResponse.ok ||
@@ -180,7 +185,8 @@ export async function POST(request: NextRequest) {
     ) {
       console.error(
         "Erro ao trocar code da Meta:",
-        tokenData
+        tokenResponse.status,
+        tokenData.error?.message || "A Meta não retornou um token.",
       );
 
       return NextResponse.json(
@@ -202,7 +208,7 @@ export async function POST(request: NextRequest) {
     // =====================================================
 
     const phoneResponse = await fetch(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}?fields=id,display_phone_number,verified_name`,
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${phoneNumberId}?fields=id,display_phone_number,verified_name`,
       {
         headers: {
           Authorization:
@@ -213,12 +219,18 @@ export async function POST(request: NextRequest) {
     );
 
     const phoneData =
-      await phoneResponse.json();
+      await phoneResponse.json() as {
+        id?: string;
+        display_phone_number?: string;
+        verified_name?: string;
+        error?: { message?: string };
+      };
 
-    if (!phoneResponse.ok) {
+    if (!phoneResponse.ok || phoneData.id !== phoneNumberId) {
       console.error(
         "Erro ao buscar número na Meta:",
-        phoneData
+        phoneResponse.status,
+        phoneData.error?.message || "O ID do número retornado não confere.",
       );
 
       return NextResponse.json(
@@ -284,7 +296,7 @@ export async function POST(request: NextRequest) {
 
     const subscriptionResponse =
       await fetch(
-        `https://graph.facebook.com/${GRAPH_VERSION}/${wabaId}/subscribed_apps`,
+        `https://graph.facebook.com/${META_GRAPH_VERSION}/${wabaId}/subscribed_apps`,
         {
           method: "POST",
 

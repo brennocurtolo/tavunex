@@ -1,416 +1,229 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import {
+  getCompanyWhatsAppAccessToken,
+  sendWhatsAppText,
+} from "@/lib/server/whatsapp";
 
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
-const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const META_APP_SECRET = process.env.META_APP_SECRET;
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  },
 );
 
-// =========================================================
-// GET - META VERIFICA NOSSO WEBHOOK
-// =========================================================
+type WhatsAppMessage = {
+  id?: string;
+  from?: string;
+  type?: string;
+  text?: { body?: string };
+};
+
+type WhatsAppValue = {
+  metadata?: { phone_number_id?: string };
+  contacts?: Array<{
+    wa_id?: string;
+    profile?: { name?: string };
+  }>;
+  messages?: WhatsAppMessage[];
+};
+
+type WhatsAppWebhookPayload = {
+  entry?: Array<{
+    changes?: Array<{ value?: WhatsAppValue }>;
+  }>;
+};
+
+function hasValidSignature(body: string, signatureHeader: string | null) {
+  if (!META_APP_SECRET || !signatureHeader) return false;
+
+  const [algorithm, signature] = signatureHeader.split("=");
+  if (algorithm !== "sha256" || !/^[a-f0-9]{64}$/i.test(signature || "")) {
+    return false;
+  }
+
+  const expected = createHmac("sha256", META_APP_SECRET).update(body).digest();
+  const received = Buffer.from(signature, "hex");
+  return received.length === expected.length && timingSafeEqual(received, expected);
+}
+
+async function processMessage(value: WhatsAppValue, message: WhatsAppMessage, origin: string) {
+  const messageId = message.id;
+  const phoneNumberId = value.metadata?.phone_number_id;
+  const customerPhone = message.from;
+  const messageText = message.type === "text" ? message.text?.body?.trim() : "";
+
+  if (!messageId || !phoneNumberId || !customerPhone) {
+    throw new Error("Evento do WhatsApp sem identificadores obrigatórios.");
+  }
+
+  const { error: claimError } = await supabase
+    .from("whatsapp_processed_messages")
+    .insert({ message_id: messageId });
+
+  if (claimError?.code === "23505") {
+    console.log("Mensagem do WhatsApp já processada:", messageId);
+    return;
+  }
+
+  if (claimError) {
+    console.error("Erro ao registrar mensagem recebida:", claimError);
+    throw new Error("Não foi possível registrar a mensagem recebida.");
+  }
+
+  try {
+    if (!messageText) {
+      console.log("Mensagem não textual recebida; não será processada pela IA.");
+      return;
+    }
+
+    const { data: company, error: companyError } = await supabase
+      .from("companies")
+      .select("id, name, whatsapp_connected")
+      .eq("whatsapp_phone_number_id", phoneNumberId)
+      .maybeSingle();
+
+    if (companyError) {
+      console.error("Erro ao identificar salão pelo número conectado:", companyError);
+      throw new Error("Não foi possível identificar o salão do WhatsApp.");
+    }
+
+    if (!company || !company.whatsapp_connected) {
+      throw new Error("O número recebido não está conectado a um salão ativo.");
+    }
+
+    const contact = value.contacts?.find((item) => item.wa_id === customerPhone)
+      ?? value.contacts?.[0];
+    const aiResponse = await fetch(new URL("/api/ai", origin), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: messageText,
+        companyId: company.id,
+        customerPhone,
+        customerName: contact?.profile?.name || null,
+      }),
+      cache: "no-store",
+    });
+
+    const aiData = (await aiResponse.json().catch(() => null)) as {
+      response?: unknown;
+      human?: boolean;
+      error?: string;
+    } | null;
+
+    if (!aiResponse.ok) {
+      console.error("Erro ao processar mensagem na IA:", aiData?.error || aiResponse.status);
+      throw new Error("Não foi possível processar a mensagem com a IA.");
+    }
+
+    if (aiData?.human === true || typeof aiData?.response !== "string" || !aiData.response.trim()) {
+      console.log("A conversa está em atendimento humano ou a IA não gerou resposta.");
+      return;
+    }
+
+    const accessToken = await getCompanyWhatsAppAccessToken(supabase, company.id);
+    await sendWhatsAppText({
+      phoneNumberId,
+      accessToken,
+      to: customerPhone,
+      message: aiData.response.trim(),
+    });
+
+    console.log("Resposta da IA enviada pelo WhatsApp:", {
+      companyId: company.id,
+      messageId,
+    });
+  } catch (error) {
+    const { error: releaseError } = await supabase
+      .from("whatsapp_processed_messages")
+      .delete()
+      .eq("message_id", messageId);
+
+    if (releaseError) {
+      console.error("Erro ao liberar mensagem para nova tentativa:", releaseError);
+    }
+    throw error;
+  }
+}
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
-
   const mode = searchParams.get("hub.mode");
   const token = searchParams.get("hub.verify_token");
   const challenge = searchParams.get("hub.challenge");
 
-  if (
-    mode === "subscribe" &&
-    token === VERIFY_TOKEN &&
-    challenge
-  ) {
-    console.log("Webhook verificado pela Meta.");
+  if (!VERIFY_TOKEN) {
+    console.error("WHATSAPP_VERIFY_TOKEN não está configurado.");
+    return NextResponse.json(
+      { error: "Webhook não configurado." },
+      { status: 500 },
+    );
+  }
 
-    return new Response(challenge, {
-      status: 200,
-    });
+  if (mode === "subscribe" && token === VERIFY_TOKEN && challenge) {
+    return new Response(challenge, { status: 200 });
   }
 
   return NextResponse.json(
-    {
-      error: "Falha na verificação do webhook.",
-    },
-    {
-      status: 403,
-    }
+    { error: "Falha na verificação do webhook." },
+    { status: 403 },
   );
 }
 
-// =========================================================
-// POST - RECEBE EVENTOS DO WHATSAPP
-// =========================================================
-
 export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-
-    // -----------------------------------------------------
-    // 1. PEGA O EVENTO RECEBIDO
-    // -----------------------------------------------------
-
-    const change =
-      body?.entry?.[0]?.changes?.[0]?.value;
-
-    if (!change) {
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    // -----------------------------------------------------
-    // 2. IGNORA EVENTOS QUE NÃO SÃO MENSAGENS
-    // Ex.: delivered, read, sent etc.
-    // -----------------------------------------------------
-
-    const whatsappMessage = change.messages?.[0];
-    
-    if (!whatsappMessage) {
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    const whatsappMessageId = whatsappMessage.id;
-
-    const messageTimestamp = Number(whatsappMessage.timestamp) * 1000;
-
-    const messageAgeMinutes =
-      (Date.now() - messageTimestamp) / 1000 / 60;
-
-    console.log(
-      "IDADE DA MENSAGEM:",
-      messageAgeMinutes.toFixed(2),
-      "minutos"
-    );
-
-    // Tenta registrar a mensagem
-    const { error: duplicateError } = await supabase
-      .from("whatsapp_processed_messages")
-      .insert({
-        message_id: whatsappMessageId,
-      });
-
-    if (duplicateError) {
-      // Código 23505 = chave duplicada
-      if (duplicateError.code === "23505") {
-        console.log(
-          "Mensagem já processada. Ignorando:",
-          whatsappMessageId
-        );
-
-        return NextResponse.json({
-          received: true,
-        });
-      }
-
-      console.error(
-        "Erro ao registrar mensagem:",
-        duplicateError
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    // Ignora mensagens antigas que a Meta esteja reenviando
-    if (messageAgeMinutes > 5) {
-      console.log(
-        "Mensagem antiga ignorada:",
-        whatsappMessageId
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    // -----------------------------------------------------
-    // 3. DADOS DA MENSAGEM
-    // -----------------------------------------------------
-
-    const phoneNumberId =
-      change.metadata?.phone_number_id;
-
-    const customerPhone =
-      whatsappMessage.from;
-
-    const customerName =
-      change.contacts?.[0]?.profile?.name || null;
-
-    const messageText =
-      whatsappMessage.type === "text"
-        ? whatsappMessage.text?.body
-        : null;
-
-    console.log(
-      "======================================"
-    );
-
-    console.log("PHONE NUMBER ID:", phoneNumberId);
-    console.log("CLIENTE:", customerPhone);
-    console.log("MENSAGEM:", messageText);
-
-    // -----------------------------------------------------
-    // 4. VALIDA PHONE NUMBER ID
-    // -----------------------------------------------------
-
-    if (!phoneNumberId) {
-      console.error(
-        "phone_number_id não encontrado."
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    // -----------------------------------------------------
-    // 5. DESCOBRE QUAL SALÃO RECEBEU A MENSAGEM
-    // -----------------------------------------------------
-
-    const {
-      data: company,
-      error: companyError,
-    } = await supabase
-      .from("companies")
-      .select("id, name")
-      .eq(
-        "whatsapp_phone_number_id",
-        phoneNumberId
-      )
-      .maybeSingle();
-
-    if (companyError) {
-      console.error(
-        "Erro ao identificar empresa:",
-        companyError
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    if (!company) {
-      console.error(
-        "Nenhuma empresa encontrada para o phone_number_id:",
-        phoneNumberId
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    console.log(
-      "EMPRESA:",
-      company.name
-    );
-
-    console.log(
-      "COMPANY ID:",
-      company.id
-    );
-
-    // -----------------------------------------------------
-    // 6. POR ENQUANTO ACEITAMOS SOMENTE TEXTO
-    // -----------------------------------------------------
-
-    if (!messageText) {
-      console.log(
-        "Mensagem não textual recebida. Ignorando por enquanto."
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    // -----------------------------------------------------
-    // 7. ENVIA A MENSAGEM PARA NOSSA IA
-    // -----------------------------------------------------
-
-    console.log(
-      "Enviando mensagem para IA..."
-    );
-
-    const aiResponse = await fetch(
-      "http://localhost:3000/api/ai",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-
-        body: JSON.stringify({
-          message: messageText,
-          companyId: company.id,
-          customerPhone: customerPhone,
-          customerName: customerName,
-        }),
-      }
-    );
-
-    const aiData = await aiResponse.json();
-
-    // -----------------------------------------------------
-    // 8. VERIFICA ERRO DA IA
-    // -----------------------------------------------------
-
-    if (!aiResponse.ok) {
-      console.error(
-        "Erro ao chamar IA:",
-        aiData
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    // -----------------------------------------------------
-    // 9. ATENDIMENTO HUMANO
-    //
-    // Se /api/ai retornar response: null porque a conversa
-    // está com humano, NÃO respondemos automaticamente.
-    // -----------------------------------------------------
-
-    if (
-      aiData.human === true ||
-      !aiData.response
-    ) {
-      console.log(
-        "Conversa em atendimento humano. IA não responderá."
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    const responseText =
-      aiData.response;
-
-    console.log(
-      "RESPOSTA DA IA:",
-      responseText
-    );
-
-    // -----------------------------------------------------
-    // 10. CONFERE TOKEN DO WHATSAPP
-    // -----------------------------------------------------
-
-    if (!WHATSAPP_ACCESS_TOKEN) {
-      console.error(
-        "WHATSAPP_ACCESS_TOKEN não configurado."
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    // -----------------------------------------------------
-    // 11. ENVIA RESPOSTA PARA O WHATSAPP
-    // -----------------------------------------------------
-
-    console.log(
-      "Enviando resposta para WhatsApp..."
-    );
-
-    const whatsappResponse = await fetch(
-      `https://graph.facebook.com/v23.0/${phoneNumberId}/messages`,
-      {
-        method: "POST",
-
-        headers: {
-          Authorization:
-            `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-
-          "Content-Type":
-            "application/json",
-        },
-
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-
-          recipient_type: "individual",
-
-          to: customerPhone,
-
-          type: "text",
-
-          text: {
-            body: responseText,
-          },
-        }),
-      }
-    );
-
-    const whatsappData =
-      await whatsappResponse.json();
-
-    // -----------------------------------------------------
-    // 12. VERIFICA SE A META ACEITOU
-    // -----------------------------------------------------
-
-    if (!whatsappResponse.ok) {
-      console.error(
-        "Erro ao enviar mensagem pelo WhatsApp:",
-        JSON.stringify(
-          whatsappData,
-          null,
-          2
-        )
-      );
-
-      return NextResponse.json({
-        received: true,
-      });
-    }
-
-    console.log(
-      "Mensagem enviada pelo WhatsApp com sucesso."
-    );
-
-    console.log(
-      "MESSAGE ID:",
-      whatsappData?.messages?.[0]?.id
-    );
-
-    console.log(
-      "======================================"
-    );
-
-    // -----------------------------------------------------
-    // 13. FINALIZA WEBHOOK
-    // -----------------------------------------------------
-
-    return NextResponse.json({
-      received: true,
-    });
-
-  } catch (error) {
-    console.error(
-      "Erro no webhook:",
-      error
-    );
-
+  if (!META_APP_SECRET) {
+    console.error("META_APP_SECRET não está configurado para validar o webhook.");
     return NextResponse.json(
-      {
-        error:
-          "Erro ao processar webhook.",
-      },
-      {
-        status: 500,
+      { error: "Webhook não configurado." },
+      { status: 500 },
+    );
+  }
+
+  const rawBody = await request.text();
+  if (!hasValidSignature(rawBody, request.headers.get("x-hub-signature-256"))) {
+    return NextResponse.json(
+      { error: "Assinatura do webhook inválida." },
+      { status: 401 },
+    );
+  }
+
+  let payload: WhatsAppWebhookPayload;
+  try {
+    payload = JSON.parse(rawBody) as WhatsAppWebhookPayload;
+  } catch {
+    return NextResponse.json(
+      { error: "Corpo JSON inválido." },
+      { status: 400 },
+    );
+  }
+
+  try {
+    for (const entry of payload.entry ?? []) {
+      for (const change of entry.changes ?? []) {
+        const value = change.value;
+        if (value) {
+          for (const message of value.messages ?? []) {
+            await processMessage(value, message, request.nextUrl.origin);
+          }
+        }
       }
+    }
+
+    return NextResponse.json({ received: true });
+  } catch (error) {
+    console.error("Erro ao processar webhook do WhatsApp:", error);
+    return NextResponse.json(
+      { error: "Falha ao processar o webhook." },
+      { status: 500 },
     );
   }
 }
