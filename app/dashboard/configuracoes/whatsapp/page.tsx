@@ -22,7 +22,7 @@ declare global {
           config_id: string;
           response_type: string;
           override_default_response_type: boolean;
-          extras: { setup: Record<string, never>; sessionInfoVersion: string };
+          extras: { setup: Record<string, never> };
         },
       ) => void;
     };
@@ -101,16 +101,26 @@ export default function WhatsAppConfigPage() {
       }
 
       try {
-        const data =
+        const data = (
           typeof event.data === "string"
             ? JSON.parse(event.data)
-            : event.data;
+            : event.data
+        ) as {
+          type?: string;
+          event?: string;
+          data?: {
+            waba_id?: string;
+            phone_number_id?: string;
+            error_message?: string;
+            error_code?: string;
+            current_step?: string;
+            session_id?: string;
+          };
+        };
 
         if (data?.type !== "WA_EMBEDDED_SIGNUP") {
           return;
         }
-
-        console.log("META EMBEDDED SIGNUP:", data);
 
         if (data.event === "FINISH") {
           const wabaId =
@@ -123,32 +133,44 @@ export default function WhatsAppConfigPage() {
             wabaId,
             phoneNumberId,
           };
-
-          console.log("WABA ID:", wabaId);
-          console.log(
-            "PHONE NUMBER ID:",
-            phoneNumberId
-          );
         }
 
         if (data.event === "CANCEL") {
           setConnecting(false);
-          setConnectionMessage(
-            "A conexão com o WhatsApp foi cancelada."
-          );
+          if (data.data?.error_message) {
+            const errorCode = data.data.error_code
+              ? ` (${data.data.error_code})`
+              : "";
+            const step = data.data.current_step
+              ? ` Etapa: ${data.data.current_step}.`
+              : "";
+            setConnectionError(
+              `A Meta interrompeu a conexão${errorCode}: ${data.data.error_message}.${step}`,
+            );
+            console.error("Erro reportado pelo Embedded Signup:", {
+              errorCode: data.data.error_code,
+              currentStep: data.data.current_step,
+              sessionId: data.data.session_id,
+            });
+          } else {
+            setConnectionMessage(
+              "A conexão com o WhatsApp foi cancelada.",
+            );
+          }
         }
 
         if (data.event === "ERROR") {
-          console.error(
-            "Erro no Embedded Signup:",
-            data
-          );
-
           setConnecting(false);
-
           setConnectionError(
-            "Ocorreu um erro durante a conexão com a Meta."
+            data.data?.error_message
+              ? `Erro da Meta${data.data.error_code ? ` (${data.data.error_code})` : ""}: ${data.data.error_message}`
+              : "Ocorreu um erro durante a conexão com a Meta.",
           );
+          console.error("Erro no Embedded Signup:", {
+            errorCode: data.data?.error_code,
+            currentStep: data.data?.current_step,
+            sessionId: data.data?.session_id,
+          });
         }
       } catch {
         // Ignora outros postMessages da Meta.
@@ -192,7 +214,7 @@ export default function WhatsAppConfigPage() {
       appId,
       cookie: true,
       xfbml: true,
-      version: "v25.0",
+      version: "v26.0",
     });
 
     setSdkReady(true);
@@ -282,7 +304,6 @@ export default function WhatsAppConfigPage() {
           override_default_response_type: true,
           extras: {
             setup: {},
-            sessionInfoVersion: "3",
           },
         }
       );

@@ -68,17 +68,22 @@ Para disponibilizar esse fluxo:
    `WHATSAPP_VERIFY_TOKEN` ficam somente no servidor. Ao trocar de aplicativo da
    Meta, atualize o ID, o ID da configuração do Embedded Signup e o segredo para
    pertencerem ao mesmo aplicativo; depois, faça um novo deploy.
-3. No aplicativo da Meta, autorize o domínio definitivo em **Facebook Login for
-   Business > Settings > Allowed Domains for the JavaScript SDK** e os endereços
-   HTTPS usados pelo fluxo em **Valid OAuth Redirect URIs**. Conclua as permissões
-   e verificações exigidas pela Meta para atender empresas de terceiros e coloque
-   o aplicativo em modo **Live** antes de liberar para clientes.
-4. Configure em **Webhooks** do produto WhatsApp a URL
+3. No aplicativo da Meta, crie uma nova configuração em **Facebook Login for
+   Business > Configurations**, escolha a variação **Embedded Signup** e o produto
+   **Cloud API**. Use o ID dessa configuração v4 como `NEXT_PUBLIC_META_CONFIG_ID`
+   na Vercel; não reutilize uma configuração Embedded Signup v2/v3. A Meta
+   descontinuou v2/v3 em 15 de outubro de 2026.
+4. Autorize o domínio definitivo em **Facebook Login for Business > Settings >
+   Client OAuth settings** e nos campos de domínios permitidos e URIs OAuth.
+   Habilite os logins OAuth exigidos pela Meta. Conclua as permissões avançadas e
+   verificações para atender empresas de terceiros e coloque o aplicativo em modo
+   **Live** antes de liberar para clientes.
+5. Configure em **Webhooks** do produto WhatsApp a URL
    `https://<dominio-publicado>/api/whatsapp/webhook`, usando o mesmo
    `WHATSAPP_VERIFY_TOKEN` definido no servidor, e assine o campo `messages`.
    O webhook também valida a assinatura `x-hub-signature-256` usando o
    `META_APP_SECRET`.
-5. Valide a conexão com uma conta de salão no domínio publicado. O acesso por HTTPS
+6. Valide a conexão com uma conta de salão no domínio publicado. O acesso por HTTPS
    resolve o bloqueio de HTTP; a autorização também depende da configuração e
    aprovação do aplicativo na Meta.
 

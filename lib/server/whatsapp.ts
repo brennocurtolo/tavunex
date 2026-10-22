@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-export const META_GRAPH_VERSION = "v25.0";
+export const META_GRAPH_VERSION = "v26.0";
 
 type WhatsAppMessage = {
   id?: string;
